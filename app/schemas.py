@@ -13,7 +13,7 @@ class StartDockerRequest(BaseModel):
     exercise_name: str #name of the exercise
     competition_name: str #name of the competition
     competition_uuid: str #uuid of the competition
-    port: int #port where the container is interacting
+    port: Optional[int] = None #port where the container is interacting
 
 #Docker shutdown schema
 class ShutdownDockerRequest(BaseModel):

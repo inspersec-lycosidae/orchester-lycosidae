@@ -30,7 +30,7 @@ async def root_func():
     return {"message": "Root function ran!"}
 
 
-#Starts a docker image of a given exercise
+# Starts a docker image of a given exercise
 @router.post("/start")
 async def start_docker(request: StartDockerRequest):
     """
@@ -43,32 +43,6 @@ async def start_docker(request: StartDockerRequest):
         4. Find a free host port (50000–60000).
         5. Run the container with port mapping.
         6. Schedule container stop as a failsafe.
-
-    Args:
-        request (StartDockerRequest): Contains competition_name, exercise_name, competition_uuid,
-                                     image_link, port, and time_alive.
-    {
-        "image_link": "inspersec/basic-ctf:latest",
-        "time_alive": 50,
-        "exercise_name": "reverse_shell",
-        "competition_name": "cyber_challenge",
-        "competition_uuid": "123e4567-e89b-12d3-a456-426614174002",
-        "port": 5000
-    }
-    
-
-    Returns:
-        dict: Status, container_id, allocated host_port, time_alive, and service_url.
-    {
-        "status": "success",
-        "container_id": "a02d2e43351dad6e3b929bf1d35d7cfa4cb23e5768e593f046d477fcd641cf41",
-        "time_alive": 50,
-        "host_port": 50000,
-        "service_url": "http://84.247.185.240:50000"
-    }
-
-    Raises:
-        HTTPException: If any Docker operation fails or input is invalid.
     """
     try:
         # Sanitize container name components
@@ -86,9 +60,27 @@ async def start_docker(request: StartDockerRequest):
         if result.returncode != 0:
             raise HTTPException(status_code=404, detail=f"Failed to pull image: {result.stderr.strip()}")
 
+        container_port = request.port
+
+        if not container_port:
+            inspect_cmd = [
+                "docker", "inspect", 
+                "--format", '{{index .Config.Labels "lycosidae.port"}}', 
+                request.image_link
+            ]
+            inspect_result = subprocess.run(inspect_cmd, capture_output=True, text=True)
+            label_value = inspect_result.stdout.strip()
+
+            if label_value and label_value != "<no value>":
+                try:
+                    container_port = int(label_value)
+                except ValueError:
+                    container_port = 80
+            else:
+                container_port = 80 
+
         # Find an available host port (50000–60000)
         host_port = find_free_port(50000, 60000)
-        container_port = request.port
 
         # Run container with port mapping for external access
         run_cmd = [
