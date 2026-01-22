@@ -38,7 +38,7 @@ def validate_time_alive(time_alive: int, max_seconds: int = 15552000) -> int:
     Raises:
         HTTPException: If time_alive is not a positive integer or exceeds max_seconds.
     """
-    if not isinstance(time_alive, int) or time_alive <= 0 or time_alive > max_seconds:
+    if not isinstance(time_alive, int) or time_alive < 0 or time_alive > max_seconds:
         raise HTTPException(
             status_code=400, 
             detail=f"time_alive must be between 1 and {max_seconds} seconds"

@@ -105,8 +105,12 @@ async def start_docker(request: StartDockerRequest):
         #You should also have it coded in you backend to track the uptime of containers in you DB
         #and send the apropriate kill signal when the time is up. This is just a failsafe and 
         #doesnt substitute a proper time control.
-        stop_cmd = f"sleep {time_alive} && docker stop {container_name} && docker rm {container_name}"
-        subprocess.Popen(["sh", "-c", stop_cmd])
+        if time_alive > 0:
+            stop_cmd = f"sleep {time_alive} && docker stop {container_name} && docker rm {container_name}"
+            subprocess.Popen(["sh", "-c", stop_cmd])
+        else:
+            # Se for 0, o log avisa que o container ficará persistente
+            print(f"INFO: Container {container_name} started without auto-shutdown (time_alive=0)")
 
         return {
             "status": "success",
