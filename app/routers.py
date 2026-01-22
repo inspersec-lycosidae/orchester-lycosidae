@@ -45,13 +45,7 @@ async def start_docker(request: StartDockerRequest):
         6. Schedule container stop as a failsafe.
     """
     try:
-        # Sanitize container name components
-        container_name = sanitize_container_name(
-            request.competition_name +
-            request.exercise_name +
-            request.competition_uuid
-        )
-        # Validate time_alive
+        container_name = sanitize_container_name(request.exercise_name)
         time_alive = validate_time_alive(request.time_alive)
 
         # Pull the image
@@ -60,24 +54,22 @@ async def start_docker(request: StartDockerRequest):
         if result.returncode != 0:
             raise HTTPException(status_code=404, detail=f"Failed to pull image: {result.stderr.strip()}")
 
-        container_port = request.port
 
-        if not container_port:
-            inspect_cmd = [
-                "docker", "inspect", 
-                "--format", '{{index .Config.Labels "lycosidae.port"}}', 
-                request.image_link
-            ]
-            inspect_result = subprocess.run(inspect_cmd, capture_output=True, text=True)
-            label_value = inspect_result.stdout.strip()
+        inspect_cmd = [
+            "docker", "inspect", 
+            "--format", '{{index .Config.Labels "lycosidae.port"}}', 
+            request.image_link
+        ]
+        inspect_result = subprocess.run(inspect_cmd, capture_output=True, text=True)
+        label_value = inspect_result.stdout.strip()
 
-            if label_value and label_value != "<no value>":
-                try:
-                    container_port = int(label_value)
-                except ValueError:
-                    container_port = 80
-            else:
-                container_port = 80 
+        if label_value and label_value != "<no value>":
+            try:
+                container_port = int(label_value)
+            except ValueError:
+                container_port = 80
+        else:
+            container_port = 80 
 
         # Find an available host port (50000–60000)
         host_port = find_free_port(50000, 60000)

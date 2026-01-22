@@ -1,6 +1,7 @@
 from fastapi import HTTPException
 import re
 import socket
+import subprocess
 
 def sanitize_container_name(name: str) -> str:
     """
@@ -59,9 +60,18 @@ def find_free_port(start: int = 50000, end: int = 60000) -> int:
     Raises:
         RuntimeError: If no free port is found in the given range.
     """
+    cmd = ["docker", "ps", "--format", "{{.Ports}}"]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    
+    used_ports = set()
+    for line in result.stdout.splitlines():
+        import re
+        matches = re.findall(r':(\d+)->', line)
+        for m in matches:
+            used_ports.add(int(m))
+
     for port in range(start, end):
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            if s.connect_ex(("0.0.0.0", port)) != 0:  # port is free
-                return port
-    raise RuntimeError(f"No free ports available in range {start}-{end}")
+        if port not in used_ports:
+            return port
+            
+    raise RuntimeError(f"Nenhuma porta disponível entre {start}-{end}")
