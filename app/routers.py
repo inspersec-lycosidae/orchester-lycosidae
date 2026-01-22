@@ -1,10 +1,10 @@
-# routers.py
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, BackgroundTasks
 from utils import *
-from schemas import *
+from schemas import StartDockerRequest, ShutdownDockerRequest, DeleteDockerRequest
 import subprocess
 import os
-import socket
+import asyncio
+import httpx
 
 router = APIRouter(
     prefix="/orchester",
@@ -13,218 +13,141 @@ router = APIRouter(
 
 PUBLIC_IP = os.getenv("PUBLIC_IP")
 
+async def internal_stop_container(container_id: str):
+    """Executa a paragem e remoção física do container."""
+    # Stop
+    subprocess.run(["docker", "stop", container_id], capture_output=True)
+    # Remove
+    subprocess.run(["docker", "rm", container_id], capture_output=True)
 
-###################################
-##### Routers Functions Below #####
-###################################
+async def delayed_shutdown(container_id: str, time_alive: int, callback_url: str = None):
+    """Tarefa em background que aguarda o tempo de vida e encerra o container."""
+    await asyncio.sleep(time_alive)
+    
+    print(f"INFO: Tempo expirado para o container {container_id}. Encerrando...")
+    await internal_stop_container(container_id)
+    
+    # Notifica o Backend (Interpreter) que o container foi removido
+    if callback_url:
+        try:
+            async with httpx.AsyncClient() as client:
+                # O status 'expired' avisa o backend para limpar o banco de dados
+                await client.post(callback_url, json={
+                    "container_id": container_id, 
+                    "status": "expired"
+                })
+        except Exception as e:
+            print(f"ERROR: Falha ao enviar callback para {callback_url}: {e}")
 
-#Default function, change as needed
 @router.get("")
 async def root_func():
+    return {"message": "Orchester Microservice is running!"}
+
+@router.get("/status/{container_id}")
+async def get_container_status(container_id: str):
     """
-    Root endpoint for testing or default access.
-
-    Returns:
-        dict: A simple message confirming the route works.
+    Verifica se o container ainda está em execução no Docker.
+    Essencial para a sincronização (Pruning) do Backend.
     """
-    return {"message": "Root function ran!"}
+    try:
+        cmd = ["docker", "inspect", "--format={{.State.Running}}", container_id]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        
+        if result.returncode != 0:
+            return {"status": "not_found", "running": False}
+        
+        is_running = result.stdout.strip() == "true"
+        return {
+            "status": "success", 
+            "container_id": container_id, 
+            "running": is_running
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-
-# Starts a docker image of a given exercise
 @router.post("/start")
-async def start_docker(request: StartDockerRequest):
+async def start_docker(request: StartDockerRequest, background_tasks: BackgroundTasks):
     """
-    Start a Docker container for a specific exercise.
-
-    Steps:
-        1. Sanitize the container name.
-        2. Validate the requested time_alive value.
-        3. Pull the Docker image from the registry.
-        4. Find a free host port (50000–60000).
-        5. Run the container with port mapping.
-        6. Schedule container stop as a failsafe.
+    Inicia um container e agenda o seu encerramento automático.
     """
     try:
         container_name = sanitize_container_name(request.exercise_name)
         time_alive = validate_time_alive(request.time_alive)
 
-        # Pull the image
-        pull_cmd = ["docker", "pull", request.image_link]
-        result = subprocess.run(pull_cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            raise HTTPException(status_code=404, detail=f"Failed to pull image: {result.stderr.strip()}")
+        # 1. Pull da imagem
+        subprocess.run(["docker", "pull", request.image_link], check=True)
 
-
+        # 2. Detecta a porta interna via Label
         inspect_cmd = [
             "docker", "inspect", 
             "--format", '{{index .Config.Labels "lycosidae.port"}}', 
             request.image_link
         ]
-        inspect_result = subprocess.run(inspect_cmd, capture_output=True, text=True)
-        label_value = inspect_result.stdout.strip()
+        label_res = subprocess.run(inspect_cmd, capture_output=True, text=True)
+        try:
+            container_port = int(label_res.stdout.strip())
+        except:
+            container_port = 80
 
-        if label_value and label_value != "<no value>":
-            try:
-                container_port = int(label_value)
-            except ValueError:
-                container_port = 80
-        else:
-            container_port = 80 
-
-        # Find an available host port (50000–60000)
+        # 3. Aloca porta no host
         host_port = find_free_port(50000, 60000)
 
-        # Run container with port mapping for external access
+        # 4. Inicia o container
         run_cmd = [
             "docker", "run", "-d",
             "--name", container_name,
-            "--restart", "unless-stopped",
-            "-p", f"{host_port}:{container_port}",  # expose host_port externally
+            "-p", f"{host_port}:{container_port}",
             request.image_link
         ]
         result = subprocess.run(run_cmd, capture_output=True, text=True)
+        
         if result.returncode != 0:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Failed to start container: {result.stderr.strip()}"
-            )
+            raise HTTPException(status_code=500, detail=result.stderr)
 
         container_id = result.stdout.strip()
 
-        # Schedule container stop safely
-        #IMPORTANT: This is not a complete date limiter for containers. They are coded to reboot
-        #once the VPS reboots too. So there is a failsafe, which is the /shutdown route.
-        #You should also have it coded in you backend to track the uptime of containers in you DB
-        #and send the apropriate kill signal when the time is up. This is just a failsafe and 
-        #doesnt substitute a proper time control.
+        # 5. Agenda o encerramento se time_alive > 0
         if time_alive > 0:
-            stop_cmd = f"sleep {time_alive} && docker stop {container_name} && docker rm {container_name}"
-            subprocess.Popen(["sh", "-c", stop_cmd])
-        else:
-            # Se for 0, o log avisa que o container ficará persistente
-            print(f"INFO: Container {container_name} started without auto-shutdown (time_alive=0)")
+            background_tasks.add_task(
+                delayed_shutdown, 
+                container_id, 
+                time_alive, 
+                request.callback_url # Opcional: URL para avisar o backend
+            )
 
         return {
             "status": "success",
             "container_id": container_id,
-            "time_alive": time_alive,
             "host_port": host_port,
-            "service_url": f"http://{PUBLIC_IP}:{host_port}"  # exposed externally
+            "service_url": f"http://{PUBLIC_IP}:{host_port}"
         }
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    
 
-#Shutdowns the docker image of a given exercise
 @router.post("/shutdown")
 async def shutdown_docker(request: ShutdownDockerRequest):
-    """
-    Stop and remove a running Docker container by container ID.
-
-    Args:
-        request (ShutdownDockerRequest): Contains container_id to shutdown.
-    {
-        "container_id": "018cc167cf2f9eb5320d28060b6d6855ad1bcbbe67cdb931f7fcc76ffde310b8"
-    }
-
-    Returns:
-        dict: Status and container_id that was shut down.
-    {
-        "status": "success",
-        "container_id": "018cc167cf2f9eb5320d28060b6d6855ad1bcbbe67cdb931f7fcc76ffde310b8",
-    }
-
-    Raises:
-        HTTPException: If stopping or removing the container fails.
-    """
+    """Interrompe um container manualmente via API."""
     try:
-        # Stop the container
-        stop_cmd = ["docker", 
-                    "stop", 
-                    request.container_id]
-        result = subprocess.run(stop_cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            raise HTTPException(status_code=404, detail=f"Failed to stop container: {result.stderr.strip()}")
-
-        # Remove the container
-        rm_cmd = ["docker", 
-                  "rm", 
-                  request.container_id]
-        result = subprocess.run(rm_cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            raise HTTPException(status_code=500, detail=f"Failed to remove container: {result.stderr.strip()}")
-
+        await internal_stop_container(request.container_id)
         return {"status": "success", "container_id": request.container_id}
-
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    
 
-#Delete a exercise docker
 @router.post("/delete")
 async def delete_docker(request: DeleteDockerRequest):
-    """
-    Delete a Docker container and its image for a given exercise.
-
-    Steps:
-        1. Stop the container if it is running.
-        2. Remove the container.
-        3. Inspect the container to find the image ID.
-        4. Remove the image forcibly.
-
-    Args:
-        request (DeleteDockerRequest): Contains container_id of the container to delete.
-    {
-    "container_id": "018cc167cf2f9eb5320d28060b6d6855ad1bcbbe67cdb931f7fcc76ffde310b8"
-    }
-
-    Returns:
-        dict: Status, container_id, and removed image_id.
-    {
-        "status": "success",
-        "container_id": "018cc167cf2f9eb5320d28060b6d6855ad1bcbbe67cdb931f7fcc76ffde310b8",
-        "image_id": ""
-    }
-
-    Raises:
-        HTTPException: If stopping/removing the container or removing the image fails.
-    """
+    """Remove container e imagem associada."""
     try:
-        cid = request.container_id
+        # Tenta descobrir a imagem antes de deletar o container
+        inspect_cmd = ["docker", "inspect", "--format={{.Image}}", request.container_id]
+        img_res = subprocess.run(inspect_cmd, capture_output=True, text=True)
+        image_id = img_res.stdout.strip()
 
-        # Stop the container if running
-        stop_cmd = ["docker", 
-                    "stop", 
-                    cid]
-        subprocess.run(stop_cmd, capture_output=True, text=True)  # ignore errors if not running
+        await internal_stop_container(request.container_id)
 
-        # Remove the container
-        rm_cmd = ["docker", 
-                  "rm", 
-                  cid]
-        result = subprocess.run(rm_cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            raise HTTPException(status_code=404, detail=f"Failed to remove container: {result.stderr.strip()}")
+        if image_id:
+            subprocess.run(["docker", "rmi", "-f", image_id])
 
-        # Find the image used by the container
-        inspect_cmd = ["docker", 
-                       "inspect", 
-                       "--format={{.Image}}", 
-                       cid]
-        image_result = subprocess.run(inspect_cmd, capture_output=True, text=True)
-        image_id = image_result.stdout.strip()
-
-        # Remove the image
-        rmi_cmd = ["docker", 
-                   "rmi", 
-                   "-f", 
-                   image_id]
-        result = subprocess.run(rmi_cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            raise HTTPException(status_code=500, detail=f"Failed to remove image: {result.stderr.strip()}")
-
-        return {"status": "success", "container_id": cid, "image_id": image_id}
-
+        return {"status": "success", "container_id": request.container_id}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

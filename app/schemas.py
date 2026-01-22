@@ -11,6 +11,7 @@ class StartDockerRequest(BaseModel):
     image_link: str #dockerhub url
     time_alive: int #seconds
     exercise_name: str #name of the exercise
+    callback_url: Optional[str] = None
 
 #Docker shutdown schema
 class ShutdownDockerRequest(BaseModel):
